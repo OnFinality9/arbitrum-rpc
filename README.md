@@ -1,39 +1,71 @@
-# Arbitrum RPC Getting Started
+# Arbitrum One RPC: Reads, Writes, and L2 Confirmation
 
-A practical guide to working with Arbitrum One through its Ethereum-compatible JSON-RPC interface.
+Arbitrum One is EVM-compatible, but an RPC client benefits from understanding one Arbitrum-specific distinction immediately: **a general-purpose RPC endpoint and the sequencer submission endpoint do not have the same role**.
 
-## RPC endpoint
+For normal application reads and writes, this guide uses a provider endpoint:
 
-```text
-https://arbitrum.api.onfinality.io/public
+```bash
+export ARB_RPC=https://arbitrum.api.onfinality.io/public
 ```
-
-Arbitrum One is an Ethereum Layer 2. Standard EVM methods work, but it is a separate chain with its own chain ID and L1/L2 settlement model.
-
-## 1. Verify Arbitrum One
 
 Arbitrum One uses chain ID `42161` (`0xa4b1`).
 
+## Which endpoint are you talking to?
+
+Arbitrum's documentation describes two important endpoint types:
+
+| Endpoint type | What it is for |
+| --- | --- |
+| General RPC | Normal Ethereum-compatible reads and writes |
+| Direct sequencer endpoint | Transaction submission only |
+
+The public sequencer endpoint accepts only `eth_sendRawTransaction` and `eth_sendRawTransactionConditional`. It is not a replacement for a normal RPC provider.
+
+That means calls such as `eth_getBalance`, `eth_call`, `eth_getLogs`, and receipt queries belong on a general RPC endpoint such as the one used in this tutorial.
+
+## 1. Verify Arbitrum One
+
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
 ```
 
-## 2. Read the latest L2 block
+Expected result:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":"0xa4b1"}
+```
+
+Do this check when a script can be configured for several EVM chains. Sending an otherwise valid transaction to the wrong chain is an application error that JSON-RPC compatibility cannot prevent.
+
+## 2. Read the current L2 head
 
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
 ```
 
-Arbitrum block numbers and Ethereum L1 block numbers are separate sequences.
+Arbitrum L2 block numbers are their own sequence. Do not compare an Arbitrum block number directly with an Ethereum L1 block number.
 
-## 3. Read an ETH balance
+Fetch the full L2 block header and transaction hashes:
 
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getBlockByNumber",
+    "params":["latest",false]
+  }'
+```
+
+## 3. Read state exactly like an EVM application
+
+```bash
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -43,10 +75,10 @@ curl -s https://arbitrum.api.onfinality.io/public \
   }'
 ```
 
-## 4. Call a contract
+Contract reads use ordinary `eth_call`:
 
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -59,10 +91,12 @@ curl -s https://arbitrum.api.onfinality.io/public \
   }'
 ```
 
-## 5. Inspect a transaction receipt
+This is why most Ethereum libraries can be pointed at Arbitrum by changing the chain configuration.
+
+## 4. Treat the receipt as L2 execution evidence
 
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -72,70 +106,96 @@ curl -s https://arbitrum.api.onfinality.io/public \
   }'
 ```
 
-A `null` result generally means the transaction is not yet visible in the node's canonical view or the hash is wrong.
+Once a receipt exists, the transaction has executed in an Arbitrum L2 block. Check `status` before considering the application action successful.
 
-## 6. Estimate gas
+But this is not the end of the settlement story.
+
+## L2 inclusion is not the same thing as Ethereum finality
+
+Arbitrum's sequencer orders L2 transactions quickly. The Arbitrum documentation explicitly distinguishes that soft confirmation from later parent-chain posting and finality.
+
+If your application only needs responsive UX, an L2 receipt may be enough to update the interface. If it protects high-value withdrawals, accounting, or cross-chain actions, track the stronger settlement condition your risk model actually requires.
+
+A good data model often stores separate timestamps/states for:
+
+- transaction submitted;
+- included and executed on Arbitrum;
+- batch/data posted to the parent chain, if relevant to the workflow;
+- finality condition satisfied.
+
+## 5. Estimate an Arbitrum transaction
+
+The normal RPC entry point is still `eth_estimateGas`:
 
 ```bash
-curl -s https://arbitrum.api.onfinality.io/public \
+curl -s "$ARB_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
     "id":1,
     "method":"eth_estimateGas",
-    "params":[{"from":"0xYOUR_ADDRESS","to":"0xDESTINATION","value":"0x0","data":"0x"}]
+    "params":[{
+      "from":"0xYOUR_ADDRESS",
+      "to":"0xDESTINATION",
+      "value":"0x0",
+      "data":"0x"
+    }]
   }'
 ```
 
-## 7. JavaScript example
+Do not assume the final fee behaves exactly like Ethereum Mainnet just because the RPC method name is the same. Arbitrum fees include L2 execution economics and costs related to posting data to the parent chain.
 
-```js
-const RPC_URL = 'https://arbitrum.api.onfinality.io/public';
+For advanced fee inspection, Arbitrum exposes chain-specific precompiles such as `ArbGasInfo`; use the official precompile documentation or an Arbitrum-aware SDK rather than hard-coding undocumented assumptions.
 
-async function rpc(method, params = []) {
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params}),
-  });
+## 6. Query logs for an L2 indexer
 
-  const body = await res.json();
-  if (body.error) throw new Error(body.error.message);
-  return body.result;
-}
-
-const chainId = Number.parseInt(await rpc('eth_chainId'), 16);
-if (chainId !== 42161) throw new Error(`Unexpected chain: ${chainId}`);
-
-console.log(Number.parseInt(await rpc('eth_blockNumber'), 16));
+```bash
+curl -s "$ARB_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getLogs",
+    "params":[{
+      "fromBlock":"0xSTART_BLOCK",
+      "toBlock":"0xEND_BLOCK",
+      "address":"0xCONTRACT_ADDRESS"
+    }]
+  }'
 ```
 
-## Arbitrum-specific notes
+Checkpoint Arbitrum block numbers, not Ethereum block numbers. If you also need to correlate an L2 action with L1 bridge or rollup contracts, store those references separately.
 
-### L2 confirmation and L1 finality are different concepts
+## 7. Use viem as an Arbitrum-aware client
 
-A transaction can be visible on Arbitrum before every L1 settlement assumption relevant to your application is satisfied. Choose confirmation rules according to your risk model.
+```bash
+npm install viem
+```
 
-### Bridging is not a normal same-chain transfer
+```js
+import {createPublicClient, http} from 'viem';
+import {arbitrum} from 'viem/chains';
 
-Deposits and withdrawals involve bridge contracts and cross-chain messages.
+const client = createPublicClient({
+  chain: arbitrum,
+  transport: http('https://arbitrum.api.onfinality.io/public'),
+});
 
-### Explorer mismatch often means network mismatch
+console.log('chain id:', await client.getChainId());
+console.log('block:', await client.getBlockNumber());
+```
 
-Verify that you are using Arbitrum One rather than Ethereum, Arbitrum Nova, or a testnet.
+The library handles hex conversion and standard EVM RPC response shapes while the chain object prevents accidental mainnet/Arbitrum configuration mixing.
 
-## Mainnet settings
+## When the direct sequencer endpoint matters
 
-| Setting | Value |
-| --- | --- |
-| Network | Arbitrum One |
-| Chain ID | `42161` |
-| Native token | ETH |
-| RPC | `https://arbitrum.api.onfinality.io/public` |
-| Explorer | `https://arbiscan.io` |
+The direct sequencer endpoint is a specialized submission path. According to Arbitrum's docs, it accepts raw transaction submission methods rather than general reads. A successful `eth_sendRawTransaction` response there means the sequencer has ordered/executed the transaction in an L2 block, but it still does not represent parent-chain finality.
 
-## Resources
+For most applications, a normal provider endpoint is simpler because the same endpoint can serve reads, simulations, logs, receipts, and transaction submission.
 
+## References
+
+- [Arbitrum chain information](https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info)
 - [Arbitrum documentation](https://docs.arbitrum.io/)
 - [OnFinality Arbitrum RPC](https://onfinality.io/en/networks/arbitrum)
-- [OnFinality RPC network directory](https://onfinality.io/en/networks)
+- [OnFinality network directory](https://onfinality.io/en/networks)
